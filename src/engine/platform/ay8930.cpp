@@ -118,7 +118,7 @@ void DivPlatformAY8930::runDAC() {
       int prevOut=chan[i].dac.out;
       while (chan[i].dac.period>rate && !end) {
         DivSample* s=parent->getSample(chan[i].dac.sample);
-        if (s->samples<=0) {
+        if (s->samples<=0 || chan[i].dac.pos<0 || chan[i].dac.pos>=(int)s->samples) {
           chan[i].dac.sample=-1;
           immWrite(0x08+i,0);
           end=true;
@@ -285,7 +285,11 @@ void DivPlatformAY8930::tick(bool sysTick) {
               rWrite(0x08+i,0);
               addWrite(0xffff0000+(i<<8),chan[i].dac.sample);
             }
-            chan[i].dac.pos=0;
+            if (chan[i].dac.setPos) {
+              chan[i].dac.setPos=false;
+            } else {
+              chan[i].dac.pos=0;
+            }
             chan[i].dac.period=0;
             chan[i].keyOn=true;
           }
@@ -358,6 +362,29 @@ void DivPlatformAY8930::tick(bool sysTick) {
         immWrite(regPeriodL[i],chan[i].envelope.period);
         immWrite(regPeriodH[i],chan[i].envelope.period>>8);
       }
+      if (chan[i].freqChanged && chan[i].autoNoiseMode) {
+        int noiseFreq=chan[i].freq;
+        switch (chan[i].autoNoiseMode) {
+          case 1: // noise
+            noiseFreq+=chan[i].autoNoiseOff;
+            if (noiseFreq<0) noiseFreq=0;
+            if (noiseFreq>255) noiseFreq=255;
+            rWrite(0x06,noiseFreq);
+            break;
+          case 2: { // noise + OR mask
+            if (noiseFreq<0) noiseFreq=0;
+            int noiseDiv=(noiseFreq>>8)+1;
+            noiseFreq/=noiseDiv;
+            ayNoiseOr=noiseDiv;
+            immWrite(0x1a,ayNoiseOr);
+            noiseFreq+=chan[i].autoNoiseOff;
+            if (noiseFreq<0) noiseFreq=0;
+            if (noiseFreq>255) noiseFreq=255;
+            rWrite(0x06,noiseFreq);
+            break;
+          }
+        }
+      }
       chan[i].freqChanged=false;
     }
 
@@ -423,7 +450,11 @@ int DivPlatformAY8930::dispatch(DivCommand c) {
               addWrite(0xffff0000+(c.chan<<8),chan[c.chan].dac.sample);
             }
           }
-          chan[c.chan].dac.pos=0;
+          if (chan[c.chan].dac.setPos) {
+            chan[c.chan].dac.setPos=false;
+          } else {
+            chan[c.chan].dac.pos=0;
+          }
           chan[c.chan].dac.period=0;
           if (c.value!=DIV_NOTE_NULL) {
             chan[c.chan].baseFreq=NOTE_PERIODIC(c.value);
@@ -449,7 +480,11 @@ int DivPlatformAY8930::dispatch(DivCommand c) {
           } else {
             if (dumpWrites) addWrite(0xffff0000+(c.chan<<8),chan[c.chan].dac.sample);
           }
-          chan[c.chan].dac.pos=0;
+          if (chan[c.chan].dac.setPos) {
+            chan[c.chan].dac.setPos=false;
+          } else {
+            chan[c.chan].dac.pos=0;
+          }
           chan[c.chan].dac.period=0;
           chan[c.chan].dac.rate=parent->getSample(chan[c.chan].dac.sample)->rate*4096;
           if (dumpWrites) {
@@ -620,6 +655,12 @@ int DivPlatformAY8930::dispatch(DivCommand c) {
       chan[c.chan].autoEnvDen=c.value&15;
       chan[c.chan].freqChanged=true;
       break;
+    case DIV_CMD_AY_AUTO_PWM:
+      chan[c.chan].autoNoiseMode=c.value>>4;
+      chan[c.chan].autoNoiseOff=c.value&15;
+      if (chan[c.chan].autoNoiseOff>=8) chan[c.chan].autoNoiseOff-=16;
+      chan[c.chan].freqChanged=true;
+      break;
     case DIV_CMD_AY_IO_WRITE:
       if (c.value==255) {
         immWrite(0x1f,c.value2);
@@ -653,6 +694,11 @@ int DivPlatformAY8930::dispatch(DivCommand c) {
       if (sampleBank>(parent->song.sample.size()/12)) {
         sampleBank=parent->song.sample.size()/12;
       }
+      break;
+    case DIV_CMD_SAMPLE_POS:
+      chan[c.chan].dac.pos=c.value;
+      chan[c.chan].dac.setPos=true;
+      if (dumpWrites) addWrite(0xffff0005,chan[c.chan].dac.pos);
       break;
     case DIV_CMD_MACRO_OFF:
       chan[c.chan].std.mask(c.value,true);
@@ -698,6 +744,8 @@ void DivPlatformAY8930::muteChannel(int ch, bool mute) {
 void DivPlatformAY8930::forceIns() {
   for (int i=0; i<3; i++) {
     chan[i].insChanged=true;
+    chan[i].curPSGMode.val&=~8;
+    chan[i].nextPSGMode.val&=~8;
     immWrite(regPeriodL[i],chan[i].envelope.period);
     immWrite(regPeriodH[i],chan[i].envelope.period>>8);
     immWrite(regMode[i],chan[i].envelope.mode);
